@@ -43,7 +43,7 @@ EXTRA_REPOS=(
     "https://github.com/svenshi/luci-app-oxidns.git|package/luci-app-oxidns"
 )
 
-V2RAY_GEODATA_REPO="https://github.com/NetForgeCN/Loyalsoldier.git"
+V2RAY_GEODATA_REPO="https://github.com/sbwml/v2ray-geodata.git"
 V2RAY_GEODATA_DIR="package/v2ray-geodata"
 V2RAY_GEODATA_FEED_SRC="feeds/packages/net/v2ray-geodata"
 
