@@ -1,0 +1,199 @@
+name: OpenWrt Script Build
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  DEBIAN_FRONTEND: noninteractive
+  WORKDIR: ${{ github.workspace }}/openwrt
+  CONFIG_URL: ${{ github.workspace }}/.config
+  RELEASE_DIR: ${{ github.workspace }}/release-assets
+  CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
+  FORCE_UNSAFE_CONFIGURE: 1
+  SINGLE_JOB_RETRY: 0
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Init environment
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y \
+            clang llvm lld unzip ccache \
+            bzip2 g++ gawk gcc git glibc-source libncurses-dev make \
+            python3 rsync file patch bison flex zlib1g-dev libssl-dev \
+            libelf-dev bc cpio gettext swig time
+          sudo timedatectl set-timezone Asia/Shanghai
+          sudo apt-get -qq autoremove --purge -y
+          sudo apt-get -qq clean
+
+      - name: Clone source
+        run: |
+          git clone -b main https://github.com/openwrt/openwrt "$WORKDIR"
+
+      - name: Compute toolchain hash
+        id: toolchain-hash
+        run: |
+          HASH=$(git -C "$WORKDIR" log --pretty=tformat:%h -n1 -- tools toolchain)
+          echo "hash=${HASH:-none}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dl
+        uses: actions/cache@v6
+        with:
+          path: openwrt/dl
+          key: dl-${{ runner.os }}-x86-${{ hashFiles('.config', 'compile.sh') }}
+          restore-keys: |
+            dl-${{ runner.os }}-x86-
+
+      - name: Restore toolchain cache
+        id: toolchain-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: openwrt/staging_dir
+          key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
+          restore-keys: |
+            toolchain-${{ runner.os }}-x86-
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: openwrt/.ccache
+          key: ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-
+            ccache-${{ runner.os }}-x86-
+
+      - name: Run compile.sh
+        env:
+          TOOLCHAIN_KEY: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
+        run: |
+          chmod +x compile.sh
+          ./compile.sh
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x86-64
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Upload build logs on failure
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: openwrt-build-logs
+          path: |
+            openwrt/build.log
+            openwrt/retry-*.log
+            openwrt/logs/
+            openwrt/.config
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save ccache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: openwrt/.ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
+      - name: Save toolchain cache
+        if: always() && steps.toolchain-restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: openwrt/staging_dir
+          key: ${{ steps.toolchain-restore.outputs.cache-primary-key }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: firmware-x86-64
+          path: release-assets
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG="OpenWrt-$(TZ=Asia/Shanghai date +"%Y%m%d-%H%M")-${GITHUB_RUN_ID: -6}"
+          echo "Release tag: $TAG"
+
+          if [ ! -f release-assets/release-notes.txt ]; then
+            echo "::error::缺少 release-assets/release-notes.txt"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          files=(release-assets/*.img.gz release-assets/*.img release-assets/*.bin \
+                 release-assets/*.manifest release-assets/*.buildinfo)
+          shopt -u nullglob
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::release-assets/ 下没有找到任何固件文件"
+            exit 1
+          fi
+
+          gh release create "$TAG" \
+            --repo "$GH_REPO" \
+            --title "$TAG" \
+            --notes-file release-assets/release-notes.txt \
+            "${files[@]}"
+
+          echo "Release 创建完成：https://github.com/$GH_REPO/releases/tag/$TAG"
+
+      - name: Delete old releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          KEEP_RELEASES=7
+
+          LIST="$(gh release list \
+            --repo "$GH_REPO" \
+            --limit 100 \
+            --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[].tagName')"
+
+          TAGS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && TAGS+=("$line")
+          done <<< "$LIST"
+
+          echo "当前 Release 数量：${#TAGS[@]}（保留最新 $KEEP_RELEASES 个）"
+          if [ "${#TAGS[@]}" -le "$KEEP_RELEASES" ]; then
+            exit 0
+          fi
+
+          for tag in "${TAGS[@]:$KEEP_RELEASES}"; do
+            gh release delete "$tag" --repo "$GH_REPO" -y --cleanup-tag || true
+          done
