@@ -23,6 +23,14 @@ CLEAN_KERNEL="${CLEAN_KERNEL:-auto}"
 CLEAN_GOLANG="${CLEAN_GOLANG:-auto}"
 SINGLE_JOB_RETRY="${SINGLE_JOB_RETRY:-}"
 
+# honk 核心的宿主机工具链版本：必须与 openwrt-suite README「宿主机依赖」一节、
+# 以及 NetForgeCN/OpenWRT 的 OpenWRT.yml 里同名常量保持一致，否则 honk 编译失败
+HONK_ZIG_VERSION="${HONK_ZIG_VERSION:-0.14.1}"
+HONK_BPF_LINKER_VERSION="${HONK_BPF_LINKER_VERSION:-0.11.0}"
+HONK_BPF_LINKER_SHA256="${HONK_BPF_LINKER_SHA256:-10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450}"
+# 空 = 自动判断：CI（GITHUB_ACTIONS）或免密 sudo 可用时自动装，否则只提示不装
+HONK_TOOLCHAIN_AUTO="${HONK_TOOLCHAIN_AUTO:-}"
+
 RUST_CHANGED=0
 GOLANG_CHANGED=0
 KERNEL_CHANGED=0
@@ -34,6 +42,7 @@ FEEDS=(
     "dae|https://github.com/QiuSimons/luci-app-dae.git"
     "opennexttrace|https://github.com/haohaoget/luci-app-open_nexttrace.git"
     "airplay2|https://github.com/NetForgeCN/luci-app-airplay2.git;main"
+    "honk|https://github.com/QiuSimons/luci-app-honk.git"
 )
 
 EXTRA_REPOS=(
@@ -477,6 +486,110 @@ init_ccache() {
     fi
 }
 
+honk_enabled() {
+    [[ -f .config ]] || return 1
+    grep -qE '^CONFIG_PACKAGE_honk=[ym]' .config
+}
+
+install_honk_toolchain() {
+    log "安装 honk 宿主机工具链（Rust / Zig ${HONK_ZIG_VERSION} / bpf-linker ${HONK_BPF_LINKER_VERSION}）"
+
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get -qq update
+        sudo apt-get -qq install -y libbpf-dev cmake libclang-dev zstd \
+            xz-utils pkg-config ca-certificates curl
+    else
+        warn "非 apt 系系统，跳过系统包安装；请自行保证 libbpf / clang / zstd / xz 已就绪"
+    fi
+
+    if ! command -v rustup >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal
+    fi
+
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+    fi
+
+    local tmp="${TMP_WORK}/honk-toolchain"
+    mkdir -p -- "$tmp"
+
+    if ! command -v bpf-linker >/dev/null 2>&1; then
+        curl -fsSL --retry 3 -o "$tmp/bpf-linker.tar.zst" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${HONK_BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst" ||
+            die "下载 bpf-linker 失败"
+        printf '%s  %s\n' "$HONK_BPF_LINKER_SHA256" "$tmp/bpf-linker.tar.zst" | sha256sum -c - ||
+            die "bpf-linker sha256 校验失败"
+        sudo tar --zstd -xf "$tmp/bpf-linker.tar.zst" -C /usr/local/bin ||
+            die "解压 bpf-linker 失败"
+    fi
+
+    if ! command -v zig >/dev/null 2>&1 ||
+        [[ "$(zig version 2>/dev/null)" != "$HONK_ZIG_VERSION" ]]; then
+        curl -fsSL --retry 3 -o "$tmp/zig.tar.xz" \
+            "https://ziglang.org/download/${HONK_ZIG_VERSION}/zig-x86_64-linux-${HONK_ZIG_VERSION}.tar.xz" ||
+            die "下载 zig 失败"
+        sudo tar -xJf "$tmp/zig.tar.xz" -C /usr/local || die "解压 zig 失败"
+        sudo ln -sf "/usr/local/zig-x86_64-linux-${HONK_ZIG_VERSION}/zig" /usr/local/bin/zig
+    fi
+
+    [[ "$(zig version 2>/dev/null)" == "$HONK_ZIG_VERSION" ]] ||
+        die "zig 版本不符：$(zig version 2>/dev/null) != ${HONK_ZIG_VERSION}"
+    command -v bpf-linker >/dev/null 2>&1 || die "bpf-linker 安装后仍不可用"
+
+    log "honk 工具链就绪：zig $(zig version) / bpf-linker $(bpf-linker --version 2>/dev/null | head -n 1) / $(cargo --version)"
+}
+
+ensure_honk_toolchain() {
+    if ! honk_enabled; then
+        log "未选中 honk（.config 里没有 CONFIG_PACKAGE_honk=y），跳过 honk 工具链"
+        return 0
+    fi
+
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+    fi
+
+    local ok=1
+    command -v cargo >/dev/null 2>&1 || ok=0
+    command -v bpf-linker >/dev/null 2>&1 || ok=0
+    command -v zig >/dev/null 2>&1 || ok=0
+    if [[ "$ok" == "1" && "$(zig version 2>/dev/null)" == "$HONK_ZIG_VERSION" ]]; then
+        log "honk 工具链已就绪（zig ${HONK_ZIG_VERSION}），跳过安装"
+        return 0
+    fi
+
+    local auto="$HONK_TOOLCHAIN_AUTO"
+    if [[ -z "$auto" ]]; then
+        if [[ -n "${GITHUB_ACTIONS:-}" ]] || sudo -n true 2>/dev/null; then
+            auto=1
+        else
+            auto=0
+        fi
+    fi
+
+    if [[ "$auto" != "1" ]]; then
+        warn "选中了 honk，但宿主机缺少构建工具链（Rust / Zig ${HONK_ZIG_VERSION} / bpf-linker）。"
+        cat >&2 <<'EOF'
+请手动安装（详见 openwrt-suite README「宿主机依赖（honk 核心专用）」）：
+  sudo apt-get install -y libbpf-dev cmake libclang-dev zstd xz-utils pkg-config
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  curl -fsSL -o /tmp/bpf-linker.tar.zst https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+  echo "10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+  sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
+  curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+  sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
+  sudo ln -sf /usr/local/zig-x86_64-linux-0.14.1/zig /usr/local/bin/zig
+或设 HONK_TOOLCHAIN_AUTO=1 让本脚本自动安装（需要 sudo）。
+EOF
+        die "缺少 honk 构建工具链"
+    fi
+
+    install_honk_toolchain
+}
+
 download_sources() {
     log "下载编译所需源码（并行任务数：${JOBS}）"
 
@@ -562,6 +675,7 @@ usage() {
 环境变量: WORKDIR OPENWRT_REPO CONFIG_URL RELEASE_DIR JOBS REFRESH_CONFIG
           SKIP_UPDATE SKIP_DOWNLOAD SKIP_BUILD GO_AMD64_LEVEL TARGET_SUBDIR
           KERNEL_CONFIG CLEAN_KERNEL CLEAN_GOLANG SINGLE_JOB_RETRY TOOLCHAIN_KEY
+          HONK_TOOLCHAIN_AUTO HONK_ZIG_VERSION HONK_BPF_LINKER_VERSION
 EOF
 }
 
@@ -591,6 +705,7 @@ main() {
     replace_v2ray_geodata
     install_extra_repos
     prepare_config
+    ensure_honk_toolchain
     patch_kernel_config
     clean_stale_artifacts
     init_ccache
