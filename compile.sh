@@ -43,6 +43,7 @@ FEEDS=(
     "opennexttrace|https://github.com/haohaoget/luci-app-open_nexttrace.git"
     "airplay2|https://github.com/NetForgeCN/luci-app-airplay2.git;main"
     "honk|https://github.com/QiuSimons/luci-app-honk.git"
+    "photondns|https://github.com/c2h2/luci-app-photondns.git"
 )
 
 EXTRA_REPOS=(
@@ -256,6 +257,46 @@ install_airplay2_feed_pkgs() {
         die "从 airplay2 feed 安装失败"
 
     log "airplay2 feed 相关包安装完成"
+}
+
+# ---------------------------------------------------------------------------
+# photondns：给 feed 克隆补上 Cargo 工程
+#
+# 上游 c2h2/luci-app-photondns 仓库根是 Rust 工程（Cargo.toml/Cargo.lock/
+# build.rs/src/），三个 OpenWrt 包在 openwrt/ 子目录。photondns 的 Makefile 用
+# RustBinPackage 编译「包目录里的」Cargo 工程，但包里只有 Makefile 和 root/，
+# 不补必然报 could not find Cargo.toml。feed 克隆自带工程，从仓库根拷进
+# feeds/photondns/openwrt/photondns/src/ 即可（零网络、幂等、带结构校验；
+# 与 openwrt-suite 的 patches/photondns.sh 等价）。
+# ---------------------------------------------------------------------------
+
+stage_photondns_cargo() {
+    log "为 photondns 补齐 Cargo 工程"
+
+    local feed="feeds/photondns"
+    local pkg="$feed/openwrt/photondns"
+
+    if [[ ! -d "$feed/.git" ]]; then
+        warn "未找到 $feed（feeds update 还没跑过？），跳过 photondns Cargo stage"
+        return 0
+    fi
+
+    local f
+    for f in Cargo.toml Cargo.lock build.rs src src/main.rs; do
+        [[ -e "$feed/$f" ]] ||
+            die "photondns：feed 根缺少 $f —— 上游仓库结构变了，请更新 stage_photondns_cargo"
+    done
+    [[ -f "$pkg/Makefile" ]] ||
+        die "photondns：缺少 $pkg/Makefile —— 上游目录布局变了，请更新 stage_photondns_cargo"
+
+    mkdir -p "$pkg/src"
+    rm -rf "$pkg/src/src"
+    cp -a "$feed/Cargo.toml" "$feed/Cargo.lock" "$feed/build.rs" "$pkg/src/"
+    cp -a "$feed/src" "$pkg/src/src"
+
+    [[ -f "$pkg/src/Cargo.toml" && -f "$pkg/src/src/main.rs" ]] ||
+        die "photondns：Cargo 工程 stage 后不完整"
+    log "photondns Cargo 工程已 stage 到 $pkg/src/"
 }
 
 fix_rust_llvm() {
@@ -700,6 +741,7 @@ main() {
     prepare_source
     configure_feeds
     update_feeds
+    stage_photondns_cargo
     fix_rust_llvm
     fix_golang_amd64
     replace_v2ray_geodata
