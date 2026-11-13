@@ -44,6 +44,7 @@ FEEDS=(
     "airplay2|https://github.com/NetForgeCN/luci-app-airplay2.git;main"
     "honk|https://github.com/QiuSimons/luci-app-honk.git"
     "photondns|https://github.com/c2h2/luci-app-photondns.git"
+    "nikki|https://github.com/nikkinikki-org/OpenWrt-nikki.git"
 )
 
 EXTRA_REPOS=(
