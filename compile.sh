@@ -27,7 +27,9 @@ SINGLE_JOB_RETRY="${SINGLE_JOB_RETRY:-}"
 # 以及 NetForgeCN/OpenWRT 的 OpenWRT.yml 里同名常量保持一致，否则 honk 编译失败
 HONK_ZIG_VERSION="${HONK_ZIG_VERSION:-0.14.1}"
 HONK_BPF_LINKER_VERSION="${HONK_BPF_LINKER_VERSION:-0.11.0}"
-HONK_BPF_LINKER_SHA256="${HONK_BPF_LINKER_SHA256:-10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450}"
+# bpf-linker 按宿主机架构分开打包，两个资产的 sha256 不同；脚本按 uname -m 选
+HONK_BPF_LINKER_SHA256_X86_64="${HONK_BPF_LINKER_SHA256_X86_64:-${HONK_BPF_LINKER_SHA256:-10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450}}"
+HONK_BPF_LINKER_SHA256_AARCH64="${HONK_BPF_LINKER_SHA256_AARCH64:-d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9}"
 # 空 = 自动判断：CI（GITHUB_ACTIONS）或免密 sudo 可用时自动装，否则只提示不装
 HONK_TOOLCHAIN_AUTO="${HONK_TOOLCHAIN_AUTO:-}"
 
@@ -557,12 +559,33 @@ install_honk_toolchain() {
     local tmp="${TMP_WORK}/honk-toolchain"
     mkdir -p -- "$tmp"
 
-    if ! command -v bpf-linker >/dev/null 2>&1; then
+    # zig / bpf-linker 的资产名和 sha256 都随「宿主机」架构变（不是目标架构）。
+    # 之前这里硬编码 x86_64，在 aarch64 机器上会装进 x86_64 的二进制 —— 表现为
+    # "zig 版本不符：" 或直接 "cannot execute binary file"。按 uname -m 选择。
+    local host_arch host_bpf_sha
+    case "$(uname -m)" in
+        x86_64|amd64)
+            host_arch=x86_64
+            host_bpf_sha="$HONK_BPF_LINKER_SHA256_X86_64"
+            ;;
+        aarch64|arm64)
+            host_arch=aarch64
+            host_bpf_sha="$HONK_BPF_LINKER_SHA256_AARCH64"
+            ;;
+        *)
+            die "honk 工具链：暂不支持宿主机架构 $(uname -m)（只适配 x86_64 / aarch64；可手动装好 zig + bpf-linker 后设 HONK_TOOLCHAIN_AUTO=0）"
+            ;;
+    esac
+    log "honk 工具链：宿主机架构 ${host_arch}（uname -m = $(uname -m)）"
+
+    # bpf-linker：已装且「能跑」才跳过 —— 只看 command -v 会漏掉架构装错的情况
+    if ! command -v bpf-linker >/dev/null 2>&1 ||
+        ! bpf-linker --version >/dev/null 2>&1; then
         curl -fsSL --retry 3 -o "$tmp/bpf-linker.tar.zst" \
-            "https://github.com/aya-rs/bpf-linker/releases/download/v${HONK_BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst" ||
-            die "下载 bpf-linker 失败"
-        printf '%s  %s\n' "$HONK_BPF_LINKER_SHA256" "$tmp/bpf-linker.tar.zst" | sha256sum -c - ||
-            die "bpf-linker sha256 校验失败"
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${HONK_BPF_LINKER_VERSION}/bpf-linker-${host_arch}-unknown-linux-musl.tar.zst" ||
+            die "下载 bpf-linker 失败（宿主机 ${host_arch}）"
+        printf '%s  %s\n' "$host_bpf_sha" "$tmp/bpf-linker.tar.zst" | sha256sum -c - ||
+            die "bpf-linker sha256 校验失败（宿主机 ${host_arch}）"
         sudo tar --zstd -xf "$tmp/bpf-linker.tar.zst" -C /usr/local/bin ||
             die "解压 bpf-linker 失败"
     fi
@@ -570,15 +593,22 @@ install_honk_toolchain() {
     if ! command -v zig >/dev/null 2>&1 ||
         [[ "$(zig version 2>/dev/null)" != "$HONK_ZIG_VERSION" ]]; then
         curl -fsSL --retry 3 -o "$tmp/zig.tar.xz" \
-            "https://ziglang.org/download/${HONK_ZIG_VERSION}/zig-x86_64-linux-${HONK_ZIG_VERSION}.tar.xz" ||
-            die "下载 zig 失败"
+            "https://ziglang.org/download/${HONK_ZIG_VERSION}/zig-${host_arch}-linux-${HONK_ZIG_VERSION}.tar.xz" ||
+            die "下载 zig 失败（宿主机 ${host_arch}）"
         sudo tar -xJf "$tmp/zig.tar.xz" -C /usr/local || die "解压 zig 失败"
-        sudo ln -sf "/usr/local/zig-x86_64-linux-${HONK_ZIG_VERSION}/zig" /usr/local/bin/zig
+        sudo ln -sf "/usr/local/zig-${host_arch}-linux-${HONK_ZIG_VERSION}/zig" /usr/local/bin/zig
     fi
 
-    [[ "$(zig version 2>/dev/null)" == "$HONK_ZIG_VERSION" ]] ||
-        die "zig 版本不符：$(zig version 2>/dev/null) != ${HONK_ZIG_VERSION}"
-    command -v bpf-linker >/dev/null 2>&1 || die "bpf-linker 安装后仍不可用"
+    # 收尾自检：两个工具都必须「能执行」，zig 版本还要精确匹配。
+    # 架构装错时这里给出可读的错误，而不是等 honk 编译到一半才炸。
+    local zig_ver
+    zig_ver="$(zig version 2>/dev/null || true)"
+    [[ -n "$zig_ver" ]] ||
+        die "zig 无法执行（架构不匹配？宿主机 $(uname -m)，/usr/local/bin/zig -> $(readlink -f /usr/local/bin/zig 2>/dev/null || echo '?')）"
+    [[ "$zig_ver" == "$HONK_ZIG_VERSION" ]] ||
+        die "zig 版本不符：${zig_ver} != ${HONK_ZIG_VERSION}"
+    bpf-linker --version >/dev/null 2>&1 ||
+        die "bpf-linker 无法执行（架构不匹配？宿主机 $(uname -m)）"
 
     log "honk 工具链就绪：zig $(zig version) / bpf-linker $(bpf-linker --version 2>/dev/null | head -n 1) / $(cargo --version)"
 }
@@ -597,6 +627,7 @@ ensure_honk_toolchain() {
     local ok=1
     command -v cargo >/dev/null 2>&1 || ok=0
     command -v bpf-linker >/dev/null 2>&1 || ok=0
+    bpf-linker --version >/dev/null 2>&1 || ok=0
     command -v zig >/dev/null 2>&1 || ok=0
     if [[ "$ok" == "1" && "$(zig version 2>/dev/null)" == "$HONK_ZIG_VERSION" ]]; then
         log "honk 工具链已就绪（zig ${HONK_ZIG_VERSION}），跳过安装"
@@ -616,14 +647,19 @@ ensure_honk_toolchain() {
         warn "选中了 honk，但宿主机缺少构建工具链（Rust / Zig ${HONK_ZIG_VERSION} / bpf-linker）。"
         cat >&2 <<'EOF'
 请手动安装（详见 openwrt-suite README「宿主机依赖（honk 核心专用）」）：
+  # 按宿主机架构选资产（x86_64 / aarch64 都支持）
+  ARCH=$(uname -m); case "$ARCH" in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
+  case "$ARCH" in x86_64) SHA=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450 ;;
+                  aarch64) SHA=d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9 ;;
+                  *) echo "unsupported arch: $ARCH"; return 1 ;; esac
   sudo apt-get install -y libbpf-dev cmake libclang-dev zstd xz-utils pkg-config
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-  curl -fsSL -o /tmp/bpf-linker.tar.zst https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst
-  echo "10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+  curl -fsSL -o /tmp/bpf-linker.tar.zst "https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-${ARCH}-unknown-linux-musl.tar.zst"
+  echo "$SHA  /tmp/bpf-linker.tar.zst" | sha256sum -c -
   sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
-  curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+  curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.14.1/zig-${ARCH}-linux-0.14.1.tar.xz"
   sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
-  sudo ln -sf /usr/local/zig-x86_64-linux-0.14.1/zig /usr/local/bin/zig
+  sudo ln -sf "/usr/local/zig-${ARCH}-linux-0.14.1/zig" /usr/local/bin/zig
 或设 HONK_TOOLCHAIN_AUTO=1 让本脚本自动安装（需要 sudo）。
 EOF
         die "缺少 honk 构建工具链"
