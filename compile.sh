@@ -624,13 +624,37 @@ ensure_honk_toolchain() {
         . "$HOME/.cargo/env"
     fi
 
-    local ok=1
-    command -v cargo >/dev/null 2>&1 || ok=0
-    command -v bpf-linker >/dev/null 2>&1 || ok=0
-    bpf-linker --version >/dev/null 2>&1 || ok=0
-    command -v zig >/dev/null 2>&1 || ok=0
-    if [[ "$ok" == "1" && "$(zig version 2>/dev/null)" == "$HONK_ZIG_VERSION" ]]; then
-        log "honk 工具链已就绪（zig ${HONK_ZIG_VERSION}），跳过安装"
+    # 逐项检查并记下具体原因：只说「缺少工具链」在 ARM 机器上根本定位不了问题
+    # （装了错架构、rustup 没 source、PATH 里没有……表现都长一样）
+    local why="" zig_ver=""
+
+    if ! command -v cargo >/dev/null 2>&1; then
+        why="${why}  - cargo 不在 PATH（rustup 已装但当前环境没 source ~/.cargo/env？）
+"
+    fi
+
+    if ! command -v bpf-linker >/dev/null 2>&1; then
+        why="${why}  - bpf-linker 未安装（PATH 里没有）
+"
+    elif ! bpf-linker --version >/dev/null 2>&1; then
+        why="${why}  - bpf-linker 无法执行：$(command -v bpf-linker)（架构装错？宿主机 $(uname -m)）
+"
+    fi
+
+    zig_ver="$(zig version 2>/dev/null || true)"
+    if ! command -v zig >/dev/null 2>&1; then
+        why="${why}  - zig 未安装（PATH 里没有）
+"
+    elif [[ -z "$zig_ver" ]]; then
+        why="${why}  - zig 无法执行：$(command -v zig)（架构装错？宿主机 $(uname -m)）
+"
+    elif [[ "$zig_ver" != "$HONK_ZIG_VERSION" ]]; then
+        why="${why}  - zig 版本不符：${zig_ver}（需要 ${HONK_ZIG_VERSION}，路径 $(command -v zig)）
+"
+    fi
+
+    if [[ -z "$why" ]]; then
+        log "honk 工具链已就绪：zig ${zig_ver} / bpf-linker $(bpf-linker --version 2>/dev/null | head -n 1) / $(cargo --version 2>/dev/null)"
         return 0
     fi
 
@@ -644,7 +668,14 @@ ensure_honk_toolchain() {
     fi
 
     if [[ "$auto" != "1" ]]; then
-        warn "选中了 honk，但宿主机缺少构建工具链（Rust / Zig ${HONK_ZIG_VERSION} / bpf-linker）。"
+        warn "选中了 honk，但宿主机工具链不完整："
+        printf '%s' "$why" >&2
+        if [[ -z "$HONK_TOOLCHAIN_AUTO" ]]; then
+            printf '  （自动安装已跳过：非 CI 环境，且 sudo 需要密码；\n' >&2
+            printf '   加 HONK_TOOLCHAIN_AUTO=1 让脚本自己装，或先 sudo -v 刷新凭据后重跑）\n' >&2
+        else
+            printf '  （HONK_TOOLCHAIN_AUTO=%s，已按设置跳过自动安装；设为 1 可让脚本自己装）\n' "$HONK_TOOLCHAIN_AUTO" >&2
+        fi
         cat >&2 <<'EOF'
 请手动安装（详见 openwrt-suite README「宿主机依赖（honk 核心专用）」）：
   # 按宿主机架构选资产（x86_64 / aarch64 都支持）
