@@ -633,28 +633,34 @@ ensure_honk_toolchain() {
 "
     fi
 
+    local bpf_out="" bpf_ver=""
     if ! command -v bpf-linker >/dev/null 2>&1; then
         why="${why}  - bpf-linker 未安装（PATH 里没有）
 "
-    elif ! bpf-linker --version >/dev/null 2>&1; then
-        why="${why}  - bpf-linker 无法执行：$(command -v bpf-linker)（架构装错？宿主机 $(uname -m)）
+    elif ! bpf_out="$(bpf-linker --version 2>&1)"; then
+        why="${why}  - bpf-linker 无法执行：$(command -v bpf-linker)
+    原始回显：${bpf_out:-（无输出）}（架构装错？宿主机 $(uname -m)）
 "
+    else
+        bpf_ver="$(printf '%s' "$bpf_out" | head -n 1)"
     fi
 
-    zig_ver="$(zig version 2>/dev/null || true)"
+    local zig_out=""
     if ! command -v zig >/dev/null 2>&1; then
         why="${why}  - zig 未安装（PATH 里没有）
 "
-    elif [[ -z "$zig_ver" ]]; then
-        why="${why}  - zig 无法执行：$(command -v zig)（架构装错？宿主机 $(uname -m)）
+    elif ! zig_out="$(zig version 2>&1)"; then
+        why="${why}  - zig 无法执行：$(command -v zig)
+    原始回显：${zig_out:-（无输出）}（架构装错？宿主机 $(uname -m)）
 "
-    elif [[ "$zig_ver" != "$HONK_ZIG_VERSION" ]]; then
-        why="${why}  - zig 版本不符：${zig_ver}（需要 ${HONK_ZIG_VERSION}，路径 $(command -v zig)）
+    elif [[ "$zig_out" != "$HONK_ZIG_VERSION" ]]; then
+        why="${why}  - zig 版本不符：${zig_out}（需要 ${HONK_ZIG_VERSION}，路径 $(command -v zig)）
 "
     fi
 
     if [[ -z "$why" ]]; then
-        log "honk 工具链已就绪：zig ${zig_ver} / bpf-linker $(bpf-linker --version 2>/dev/null | head -n 1) / $(cargo --version 2>/dev/null)"
+        zig_ver="$zig_out"
+        log "honk 工具链已就绪：zig ${zig_ver} / ${bpf_ver} / $(cargo --version 2>/dev/null)"
         return 0
     fi
 
