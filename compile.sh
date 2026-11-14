@@ -47,6 +47,8 @@ FEEDS=(
     "honk|https://github.com/QiuSimons/luci-app-honk.git"
     "photondns|https://github.com/c2h2/luci-app-photondns.git"
     "nikki|https://github.com/nikkinikki-org/OpenWrt-nikki.git"
+    # mosdns 的默认分支是 v5（不是 main/master），这里显式钉住
+    "mosdns|https://github.com/sbwml/luci-app-mosdns.git;v5"
 )
 
 EXTRA_REPOS=(
