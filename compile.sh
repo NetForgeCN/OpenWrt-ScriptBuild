@@ -281,9 +281,10 @@ stage_photondns_cargo() {
     local feed="feeds/photondns"
     local pkg="$feed/openwrt/photondns"
 
+    # 以前这里 warn + return 0，缺 feed 时一路放行，直到 Rust 编译期才报
+    # "could not find Cargo.toml"，白等一整轮构建。与其余结构校验统一为 fail fast。
     if [[ ! -d "$feed/.git" ]]; then
-        warn "未找到 $feed（feeds update 还没跑过？），跳过 photondns Cargo stage"
-        return 0
+        die "未找到 $feed（photondns 已在 FEEDS 中却未克隆）—— 先确认 ./scripts/feeds update -a 成功；上游目录布局若已变更，请同步修改本函数"
     fi
 
     local f
