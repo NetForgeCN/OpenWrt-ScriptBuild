@@ -56,6 +56,7 @@ EXTRA_REPOS=(
     "https://github.com/jerrykuku/luci-theme-argon.git|package/luci-theme-argon"
     "https://github.com/w9315273/luci-app-pulse.git|package/luci-app-pulse"
     "https://github.com/NetForgeCN/luci-app-oxidns.git|package/luci-app-oxidns"
+    "https://github.com/NetForgeCN/luci-app-lucky.git|package/luci-app-lucky"
 )
 
 V2RAY_GEODATA_REPO="https://github.com/NetForgeCN/Loyalsoldier.git"
