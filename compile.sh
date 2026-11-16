@@ -49,6 +49,9 @@ FEEDS=(
     "nikki|https://github.com/nikkinikki-org/OpenWrt-nikki.git"
     # mosdns 的默认分支是 v5（不是 main/master），这里显式钉住
     "mosdns|https://github.com/sbwml/luci-app-mosdns.git;v5"
+    # openappfilter 的默认分支是 master，这里显式钉住（一个 feed 内含
+    # luci-app-oaf / appfilter / kmod-oaf 三个包，feeds install -a 会自动装齐）
+    "openappfilter|https://github.com/destan19/OpenAppFilter.git;master"
 )
 
 EXTRA_REPOS=(
