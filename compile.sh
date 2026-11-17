@@ -62,6 +62,11 @@ EXTRA_REPOS=(
     "https://github.com/NetForgeCN/luci-app-lucky.git|package/luci-app-lucky"
 )
 
+# v2ray-geodata 打包层：与 openwrt-suite 的 geodata 源同源于此仓库（三库一致）。
+# 仓库内唯一一份 Makefile 里 GEOIP_URL / GEOSITE_URL 都指向自建规则仓库
+# NetForgeCN/v2ray-rules-dat 的 latest release（全量 .dat + .sha256sum）。
+# 要换数据源只改那个仓库，不要在这里改回 sbwml/v2ray-geodata 或另加补丁：
+# URL 存在两处就会让 suite 与两个构建库编译出内容不同的同名包。
 V2RAY_GEODATA_REPO="https://github.com/NetForgeCN/Loyalsoldier.git"
 V2RAY_GEODATA_DIR="package/v2ray-geodata"
 V2RAY_GEODATA_FEED_SRC="feeds/packages/net/v2ray-geodata"
