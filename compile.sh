@@ -52,6 +52,10 @@ FEEDS=(
     # openappfilter 的默认分支是 master，这里显式钉住（一个 feed 内含
     # luci-app-oaf / appfilter / kmod-oaf 三个包，feeds install -a 会自动装齐）
     "openappfilter|https://github.com/destan19/OpenAppFilter.git;master"
+    # atomdns: 自有的一体化包，仓库根没有 Makefile，包目录是 luci-app-atomdns/，
+    # 走 src-git feed 由 feeds install -a 扫描到。feed 短名只能是 atomdns
+    # （名称段不含减号）：scripts/feeds 用 \w+ 解析 feeds.conf 的名称段。
+    "atomdns|https://github.com/NetForgeCN/luci-app-atomdns.git;main"
 )
 
 EXTRA_REPOS=(
