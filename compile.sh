@@ -56,6 +56,11 @@ FEEDS=(
     # 走 src-git feed 由 feeds install -a 扫描到。feed 短名只能是 atomdns
     # （名称段不含减号）：scripts/feeds 用 \w+ 解析 feeds.conf 的名称段。
     "atomdns|https://github.com/NetForgeCN/luci-app-atomdns.git;main"
+    # oxidnsplus: 自有 OxiDNS add-on，包目录是 luci-app-oxidns-plus/（仓库根
+    # 无 Makefile），同样走 src-git feed。编译期由 rust-package.mk + rust/host
+    # 从包内 Rust 源码交叉编译，依赖官方 packages feed 的 lang/rust。
+    # feed 短名用 oxidnsplus（名称段不含减号）。
+    "oxidnsplus|https://github.com/NetForgeCN/luci-app-oxidns-plus.git;main"
 )
 
 EXTRA_REPOS=(
