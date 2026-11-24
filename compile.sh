@@ -64,6 +64,11 @@ EXTRA_REPOS=(
     "https://github.com/w9315273/luci-app-pulse.git|package/luci-app-pulse"
     "https://github.com/NetForgeCN/luci-app-oxidns.git|package/luci-app-oxidns"
     "https://github.com/NetForgeCN/luci-app-lucky.git|package/luci-app-lucky"
+    # hevsocks5: 仓库根就是包目录（Makefile 在根），不能当 src-git feed 用
+    # （feeds 扫描的是 feed 下的子目录，根 Makefile 会被忽略），因此与
+    # oxidns / lucky 一样直接 clone 到 package/。LUCI_DEPENDS 里的
+    # +hev-socks5-server 由官方 packages feed 提供，无需额外克隆。
+    "https://github.com/NetForgeCN/luci-app-hevsocks5.git|package/luci-app-hevsocks5"
 )
 
 # v2ray-geodata 打包层：与 openwrt-suite 的 geodata 源同源于此仓库（三库一致）。

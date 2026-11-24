@@ -65,7 +65,7 @@ workflow 负责初始化宿主机依赖、克隆 OpenWrt 源码、恢复 dl / �
 ## 第三方组件与配置
 
 - **第三方 feeds**：`compile.sh` 内的 `FEEDS` 数组。
-- **额外克隆仓库**：`compile.sh` 内的 `EXTRA_REPOS` 数组，用于不通过 feed 提供的包。
+- **额外克隆仓库**：`compile.sh` 内的 `EXTRA_REPOS` 数组，用于根目录即包目录、不通过 feed 提供的包（hevsocks5、oxidns、lucky、argon 等）。
 - **v2ray-geodata**：删除官方同名包源与链接后，克隆 `NetForgeCN/Loyalsoldier` 到 `package/v2ray-geodata`，数据取自自建规则仓库 `NetForgeCN/v2ray-rules-dat`。
 - **.config**：仓库根目录，由使用者自行维护。
 
