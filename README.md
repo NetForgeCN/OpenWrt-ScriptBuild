@@ -50,11 +50,16 @@ cd OpenWrt-ScriptBuild
 | `SINGLE_JOB_RETRY` | 全量编译失败后是否按失败包单线程重试 |
 | `SKIP_UPDATE` / `SKIP_DOWNLOAD` / `SKIP_BUILD` | 分别跳过源码更新 / `make download` / 编译 |
 | `SOURCE_DATE_EPOCH` | 可复现构建时间戳（默认取 OpenWrt HEAD 提交时间） |
-| `HONK_TOOLCHAIN_AUTO` / `HONK_ZIG_VERSION` / `HONK_BPF_LINKER_VERSION` | honk 核心所需的宿主机工具链 |
-| `HONK_ZIG_SHA256_X86_64` / `HONK_ZIG_SHA256_AARCH64` | zig 资产校验值（默认钉住官方 0.14.1；升级版本时必须同步更新） |
-| `HONK_BPF_LINKER_SHA256_X86_64` / `HONK_BPF_LINKER_SHA256_AARCH64` | bpf-linker 资产校验值（兼容旧变量 `HONK_BPF_LINKER_SHA256`） |
+| `HONK_TOOLCHAIN_AUTO` / `HONK_ZIG_VERSION` / `HONK_BPF_LINKER_VERSION` | honk 核心所需的宿主机工具链；版本未显式指定时按当前 `HONK_SRC_VERSION` 动态解析 |
+| `HONK_ZIG_SHA256_X86_64` / `HONK_ZIG_SHA256_AARCH64` | zig 资产校验值；默认按版本与架构从 ziglang.org 官方索引读取，也可以显式指定 |
+| `HONK_BPF_LINKER_SHA256_X86_64` / `HONK_BPF_LINKER_SHA256_AARCH64` | bpf-linker 资产校验值（兼容旧变量 `HONK_BPF_LINKER_SHA256`）；x86_64 默认取上游 pins.env |
+| `HONK_SRC_URL` / `HONK_SRC_VERSION` / `HONK_MAKEFILE` / `HONK_ZIG_INDEX_URL` | 动态解析所用的源、Makefile 与 zig 索引地址（一般无需设置） |
 
-脚本内部依次完成：配置第三方 feeds → `feeds update/install -a`（失败有限重试） → Rust / golang / 内核配置补丁 → 写入 `.config` + `make defconfig` → 按需安装 honk 宿主机工具链 → `make download` → 编译 → 收集固件与构建说明到 `RELEASE_DIR`。所有步骤幂等，可重复执行。
+**honk 宿主机工具链动态解析**：`.config` 选中 honk 时，`compile.sh` 先从 `$WORKDIR/feeds/honk/honk/Makefile`（兼容 `$WORKDIR/feeds/honk/Makefile`）读取当前 `HONK_SRC_URL` / `HONK_SRC_VERSION`，拉取该 commit 的 `.github/ci/pins.env`（`BPF_LINKER_VERSION` / `BPF_LINKER_SHA256`）和 `.github/workflows/release.yml`（setup-zig 的 `version`），再按版本从 `https://ziglang.org/download/index.json` 的 `x86_64-linux` / `aarch64-linux` 条目读取 zig 资产 hash。**上游升级 honk commit 后不需要手改本仓库的版本常量或 4 个 hash**；解析成功时日志会打印来源（`upstream` / `zig-index`）与版本。优先级是**显式环境变量 > 上游动态解析 > 本地回退 pin**；网络不可达或解析失败时回退本地保存的 pin（当前 zig `0.14.1`、bpf-linker `0.11.0` 及 4 个 SHA256），离线 VM 仍能编译。
+
+下载后仍强制 `sha256sum -c`；版本升级但对应 hash 仍是旧默认值时 fail closed 并给出清晰错误（上游 `pins.env` 只提供 x86_64 bpf-linker hash，aarch64 升级时需显式设置 `HONK_BPF_LINKER_SHA256_AARCH64`）。
+
+脚本内部依次完成：配置第三方 feeds → `feeds update/install -a`（失败有限重试） → Rust / golang / 内核配置补丁 → 写入 `.config` + `make defconfig` → 按需解析并安装 honk 宿主机工具链 → `make download` → 编译 → 收集固件与构建说明到 `RELEASE_DIR`。所有步骤幂等，可重复执行。
 
 安全与可复现性：feeds.conf / `.config` / 内核配置等改动采用「同目录临时文件 + `mv`」原子替换，写入前备份、失败回滚，并拒绝通过符号链接写入；`CONFIG_URL` 只接受 https 或本地文件；feeds / 克隆 / 下载均有限重试；honk 的 zig 与 bpf-linker 资产下载后强制校验 SHA256（zig 校验值取自 ziglang.org 官方索引）；`SOURCE_DATE_EPOCH` 默认取 OpenWrt HEAD 的提交时间。workflow 中的 Actions 全部钉到 commit SHA，清理 Release 时永不删除 `backup-*` 不可变备份。
 
