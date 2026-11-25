@@ -26,7 +26,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -44,7 +44,15 @@ jobs:
 
       - name: Clone source
         run: |
+          set -euo pipefail
           git clone -b main https://github.com/openwrt/openwrt "$WORKDIR"
+          # 可复现构建：以源码 HEAD 的提交时间作为 SOURCE_DATE_EPOCH
+          EPOCH=$(git -C "$WORKDIR" log -1 --format=%ct)
+          case "$EPOCH" in
+            ''|*[!0-9]*) echo "::error::无法获取有效的 SOURCE_DATE_EPOCH"; exit 1 ;;
+          esac
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$EPOCH"
 
       - name: Compute toolchain hash
         id: toolchain-hash
@@ -53,7 +61,7 @@ jobs:
           echo "hash=${HASH:-none}" >> "$GITHUB_OUTPUT"
 
       - name: Cache dl
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/dl
           key: dl-${{ runner.os }}-x86-${{ hashFiles('.config', 'compile.sh') }}
@@ -62,7 +70,7 @@ jobs:
 
       - name: Restore toolchain cache
         id: toolchain-restore
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/staging_dir
           key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
@@ -71,7 +79,7 @@ jobs:
 
       - name: Restore ccache
         id: ccache-restore
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/.ccache
           key: ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-${{ github.run_id }}
@@ -87,7 +95,7 @@ jobs:
           ./compile.sh
 
       - name: Upload firmware artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: firmware-x86-64
           path: release-assets/
@@ -96,7 +104,7 @@ jobs:
           compression-level: 0
 
       - name: Upload build logs on failure
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: failure()
         with:
           name: openwrt-build-logs
@@ -111,7 +119,7 @@ jobs:
       - name: Save ccache
         if: always()
         continue-on-error: true
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/.ccache
           key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
@@ -119,7 +127,7 @@ jobs:
       - name: Save toolchain cache
         if: always() && steps.toolchain-restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/staging_dir
           key: ${{ steps.toolchain-restore.outputs.cache-primary-key }}
@@ -134,7 +142,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Download firmware artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: firmware-x86-64
           path: release-assets
@@ -182,7 +190,7 @@ jobs:
             --repo "$GH_REPO" \
             --limit 100 \
             --json tagName,createdAt \
-            --jq 'sort_by(.createdAt) | reverse | .[].tagName')"
+            --jq 'sort_by(.createdAt) | reverse | map(select(startswith("backup-") | not)) | .[].tagName')"
 
           TAGS=()
           while IFS= read -r line; do

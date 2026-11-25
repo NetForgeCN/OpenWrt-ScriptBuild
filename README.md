@@ -49,9 +49,14 @@ cd OpenWrt-ScriptBuild
 | `CLEAN_KERNEL` / `CLEAN_GOLANG` | 内核配置或 golang 版本变更后是否清理重建（默认 `auto`） |
 | `SINGLE_JOB_RETRY` | 全量编译失败后是否按失败包单线程重试 |
 | `SKIP_UPDATE` / `SKIP_DOWNLOAD` / `SKIP_BUILD` | 分别跳过源码更新 / `make download` / 编译 |
+| `SOURCE_DATE_EPOCH` | 可复现构建时间戳（默认取 OpenWrt HEAD 提交时间） |
 | `HONK_TOOLCHAIN_AUTO` / `HONK_ZIG_VERSION` / `HONK_BPF_LINKER_VERSION` | honk 核心所需的宿主机工具链 |
+| `HONK_ZIG_SHA256_X86_64` / `HONK_ZIG_SHA256_AARCH64` | zig 资产校验值（默认钉住官方 0.14.1；升级版本时必须同步更新） |
+| `HONK_BPF_LINKER_SHA256_X86_64` / `HONK_BPF_LINKER_SHA256_AARCH64` | bpf-linker 资产校验值（兼容旧变量 `HONK_BPF_LINKER_SHA256`） |
 
-脚本内部依次完成：配置第三方 feeds → `feeds update/install -a` → Rust / golang / 内核配置补丁 → 写入 `.config` + `make defconfig` → 按需安装 honk 宿主机工具链 → `make download` → 编译 → 收集固件与构建说明到 `RELEASE_DIR`。所有步骤幂等，可重复执行。
+脚本内部依次完成：配置第三方 feeds → `feeds update/install -a`（失败有限重试） → Rust / golang / 内核配置补丁 → 写入 `.config` + `make defconfig` → 按需安装 honk 宿主机工具链 → `make download` → 编译 → 收集固件与构建说明到 `RELEASE_DIR`。所有步骤幂等，可重复执行。
+
+安全与可复现性：feeds.conf / `.config` / 内核配置等改动采用「同目录临时文件 + `mv`」原子替换，写入前备份、失败回滚，并拒绝通过符号链接写入；`CONFIG_URL` 只接受 https 或本地文件；feeds / 克隆 / 下载均有限重试；honk 的 zig 与 bpf-linker 资产下载后强制校验 SHA256（zig 校验值取自 ziglang.org 官方索引）；`SOURCE_DATE_EPOCH` 默认取 OpenWrt HEAD 的提交时间。workflow 中的 Actions 全部钉到 commit SHA，清理 Release 时永不删除 `backup-*` 不可变备份。
 
 ### 本仓库：GitHub Actions 构建
 
