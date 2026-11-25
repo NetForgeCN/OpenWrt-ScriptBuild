@@ -1108,7 +1108,7 @@ ensure_honk_toolchain() {
   curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/bpf-linker.tar.zst "https://github.com/aya-rs/bpf-linker/releases/download/v${HONK_BPF_LINKER_VERSION}/bpf-linker-${HONK_HOST_ARCH}-unknown-linux-musl.tar.zst"
   echo "${HONK_HOST_BPF_SHA}  /tmp/bpf-linker.tar.zst" | sha256sum -c -
   sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
-  curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${HONK_ZIG_VERSION}/zig-${HONK_HOST_ARCH}-linux-${HONK_ZIG_VERSION}.tar.xz"
+  curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/zig.tar.xz "https://zigmirror.com/zig-${HONK_HOST_ARCH}-linux-${HONK_ZIG_VERSION}.tar.xz"  # 社区镜像；官方源太慢
   echo "${HONK_HOST_ZIG_SHA}  /tmp/zig.tar.xz" | sha256sum -c -
   sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
   sudo ln -sf "/usr/local/zig-${HONK_HOST_ARCH}-linux-${HONK_ZIG_VERSION}/zig" /usr/local/bin/zig
