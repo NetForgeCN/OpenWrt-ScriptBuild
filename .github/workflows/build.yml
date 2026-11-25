@@ -3,6 +3,10 @@ name: OpenWrt Script Build
 on:
   workflow_dispatch:
   repository_dispatch:
+  # 每日自主重建一次（UTC 18:00 = 北京时间 02:00），与 OpenWRT 的
+  # AutoCheck（UTC 21:17）及验证任务错开；缓存命中时不会显著增加开销。
+  schedule:
+    - cron: '0 18 * * *'
 
 concurrency:
   group: ${{ github.workflow }}
