@@ -91,6 +91,29 @@ jobs:
             ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-
             ccache-${{ runner.os }}-x86-
 
+      # 解析 honk 工具链版本（commit → pins.env / release.yml → zig 版本），
+      # 供 setup-zig 使用；脚本仓库内无 honk Makefile 时用内置 fallback commit，
+      # 与 compile.sh 内部解析同源，确保版本一致。
+      - name: Resolve honk toolchain pins
+        id: honk-pins
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/honk_toolchain.sh" > "$RUNNER_TEMP/honk-pins.env"
+          while IFS='=' read -r key value; do
+            case "$key" in
+              ZIG_VERSION|BPF_LINKER_VERSION|HONK_SRC_VERSION) ;;
+              *) continue ;;
+            esac
+            [[ "$value" =~ ^[A-Za-z0-9._:/-]+$ ]] || { echo "::error::非法 $key=$value"; exit 1; }
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          done < "$RUNNER_TEMP/honk-pins.env"
+          echo "zig 版本：$(grep '^ZIG_VERSION=' "$RUNNER_TEMP/honk-pins.env" | cut -d= -f2)"
+
+      - name: Setup Zig for honk
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: ${{ steps.honk-pins.outputs.ZIG_VERSION }}
+
       - name: Run compile.sh
         env:
           TOOLCHAIN_KEY: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
