@@ -927,6 +927,35 @@ resolve_honk_pins() {
     log "honk zig sha256 来源：${HONK_ZIG_SHA_SOURCE}；下载后仍强制 sha256sum -c"
 }
 
+# 下载 zig tarball：从社区镜像优先尝试（官方 ziglang.org 在 CI 出口经常只有几十 KB/s，
+# 49MB 包需要十几分钟且 --retry 会从头重下），镜像列表来自 zig 官方 community-mirrors.txt，
+# 按实测速度排序，官网作为最后兜底。每个镜像下载后立即 sha256 校验，失败才换下一个。
+# 用法：download_zig <version> <arch> <expected_sha256> <output_file>
+download_zig() {
+    local ver="$1" arch="$2" expected="$3" out="$4"
+    local tarball="zig-${arch}-linux-${ver}.tar.xz"
+    local mirrors=(
+        "https://zigmirror.com/${tarball}"
+        "https://zig.mirror.mschae23.de/zig/${tarball}"
+        "https://pkg.earth/zig/${tarball}"
+        "https://ziglang.org/download/${ver}/${tarball}"
+    )
+    local url
+    for url in "${mirrors[@]}"; do
+        log "尝试下载 zig：${url}"
+        # 每个镜像独立限时 180s；下载完立刻校验，失败则删除残片换下一个镜像。
+        if curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            -fsSL --connect-timeout 15 --max-time 180 -o "$out" "$url" &&
+           printf '%s  %s\n' "$expected" "$out" | sha256sum -c - >/dev/null 2>&1; then
+            log "zig 下载并校验通过：${url}"
+            return 0
+        fi
+        warn "镜像下载/校验失败：${url}"
+        rm -f -- "$out"
+    done
+    return 1
+}
+
 install_honk_toolchain() {
     log "安装 honk 宿主机工具链（Rust / Zig ${HONK_ZIG_VERSION} / bpf-linker ${HONK_BPF_LINKER_VERSION}）"
 
@@ -975,12 +1004,8 @@ install_honk_toolchain() {
 
     if ! command -v zig >/dev/null 2>&1 ||
         [[ "$(zig version 2>/dev/null)" != "$HONK_ZIG_VERSION" ]]; then
-        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
-            --connect-timeout 15 --max-time 900 -o "$tmp/zig.tar.xz" \
-            "https://ziglang.org/download/${HONK_ZIG_VERSION}/zig-${host_arch}-linux-${HONK_ZIG_VERSION}.tar.xz" ||
-            die "下载 zig 失败（宿主机 ${host_arch}）"
-        printf '%s  %s\n' "$host_zig_sha" "$tmp/zig.tar.xz" | sha256sum -c - ||
-            die "zig sha256 校验失败（宿主机 ${host_arch}）"
+        download_zig "$HONK_ZIG_VERSION" "$host_arch" "$host_zig_sha" "$tmp/zig.tar.xz" ||
+            die "下载 zig 失败（所有镜像均不可用，宿主机 ${host_arch}）"
         sudo tar -xJf "$tmp/zig.tar.xz" -C /usr/local || die "解压 zig 失败"
         sudo ln -sf "/usr/local/zig-${host_arch}-linux-${HONK_ZIG_VERSION}/zig" /usr/local/bin/zig
     fi
