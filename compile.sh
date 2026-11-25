@@ -30,6 +30,13 @@ HONK_BPF_LINKER_VERSION="${HONK_BPF_LINKER_VERSION:-0.11.0}"
 # bpf-linker 按宿主机架构分开打包，两个资产的 sha256 不同；脚本按 uname -m 选
 HONK_BPF_LINKER_SHA256_X86_64="${HONK_BPF_LINKER_SHA256_X86_64:-${HONK_BPF_LINKER_SHA256:-10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450}}"
 HONK_BPF_LINKER_SHA256_AARCH64="${HONK_BPF_LINKER_SHA256_AARCH64:-d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9}"
+# zig 官方 0.14.1 二进制的 sha256（取自 ziglang.org/download/index.json）。
+# 之前 zig 只下载不校验；现在与 bpf-linker 一样强制校验。升级 zig 时必须同时
+# 更新下面两个 sha256（或用 HONK_ZIG_SHA256_* 显式覆盖），否则会 fail closed。
+HONK_ZIG_SHA256_EXPLICIT=0
+[[ -n "${HONK_ZIG_SHA256_X86_64:-}" || -n "${HONK_ZIG_SHA256_AARCH64:-}" ]] && HONK_ZIG_SHA256_EXPLICIT=1
+HONK_ZIG_SHA256_X86_64="${HONK_ZIG_SHA256_X86_64:-24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c}"
+HONK_ZIG_SHA256_AARCH64="${HONK_ZIG_SHA256_AARCH64:-f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b}"
 # 空 = 自动判断：CI（GITHUB_ACTIONS）或免密 sudo 可用时自动装，否则只提示不装
 HONK_TOOLCHAIN_AUTO="${HONK_TOOLCHAIN_AUTO:-}"
 
@@ -97,7 +104,16 @@ warn() { printf '\n%s[警告] %s%s\n' "$C_YELLOW" "$*" "$C_OFF" >&2; }
 die()  { printf '\n%s[错误] %s%s\n' "$C_RED" "$*" "$C_OFF" >&2; exit 1; }
 
 TMP_WORK="$(mktemp -d "${TMPDIR:-/tmp}/openwrt-build.XXXXXX")"
-cleanup() { rm -rf -- "$TMP_WORK"; }
+LOCK_DIR=""
+cleanup() {
+    if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then
+        local pid=""
+        pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+        # 只清理自己的锁，避免误删另一并发运行重建的锁
+        if [[ "$pid" == "$$" ]]; then rm -rf -- "$LOCK_DIR"; fi
+    fi
+    rm -rf -- "$TMP_WORK"
+}
 
 on_err() {
     local rc=$?
@@ -109,13 +125,78 @@ on_err() {
 trap 'cleanup' EXIT
 trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
 
+# ---------------------------------------------------------------------------
+# 同目录临时文件 + mv 原子替换；保留原权限/所有者，首次改动前备份以便回滚。
+# 拒绝编辑符号链接，避免把内容写到源码树之外。
+# ---------------------------------------------------------------------------
+
+atomic_replace() {
+    local src="$1" dest="$2" bak tmp
+    [[ -f "$src" ]] || { warn "atomic_replace: 源文件不存在：$src"; return 1; }
+    [[ -f "$dest" && ! -L "$dest" ]] || { warn "atomic_replace: 目标不是普通文件（或为符号链接）：$dest"; return 1; }
+    mkdir -p -- "${TMP_WORK}/backups" || return 1
+    bak="${TMP_WORK}/backups/$(printf '%s' "$dest" | tr '/' '_').bak"
+    if [[ ! -e "$bak" ]]; then
+        cp -p -- "$dest" "$bak" || return 1
+    fi
+    tmp="$(mktemp "$(dirname "$dest")/.$(basename "$dest").tmp.XXXXXX")" || return 1
+    cp -p -- "$dest" "$tmp" || { rm -f -- "$tmp"; return 1; }
+    cat -- "$src" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+}
+
+rollback_file() {
+    local dest="$1"
+    local bak="${TMP_WORK}/backups/$(printf '%s' "$dest" | tr '/' '_').bak"
+    [[ -f "$bak" ]] || return 1
+    cp -p -- "$bak" "$dest"
+}
+
 sed_inplace() {
     local expr="$1" file="$2" tmp
-    [[ -f "$file" ]] || { warn "sed_inplace: 文件不存在：$file"; return 1; }
+    [[ -f "$file" && ! -L "$file" ]] || { warn "sed_inplace: 文件不存在或为符号链接：$file"; return 1; }
     tmp="${TMP_WORK}/$(basename "$file").sed.$$"
     sed -E "$expr" "$file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
-    cat -- "$tmp" > "$file" || { rm -f -- "$tmp"; return 1; }
+    atomic_replace "$tmp" "$file" || {
+        rm -f -- "$tmp"
+        rollback_file "$file" || true
+        return 1
+    }
     rm -f -- "$tmp"
+}
+
+# 网络命令的有限重试（feeds update/install、克隆等）。全部参数按原样透传，
+# 返回最后一次尝试的退出码，调用方用 || die 显式检查。
+retry_cmd() {
+    local attempts="$1" delay="$2" n=1
+    shift 2
+    while :; do
+        if "$@"; then
+            return 0
+        fi
+        if (( n >= attempts )); then
+            return 1
+        fi
+        warn "命令失败，${delay}s 后重试（${n}/${attempts}）：$*"
+        n=$((n + 1))
+        sleep "$delay"
+    done
+}
+
+clone_repo() {
+    local url="$1" dir="$2" n=1
+    while :; do
+        if git clone "$url" "$dir"; then
+            return 0
+        fi
+        rm -rf -- "$dir" || true
+        if (( n >= 3 )); then
+            return 1
+        fi
+        warn "克隆失败，5s 后重试（$n/3）：$url"
+        n=$((n + 1))
+        sleep 5
+    done
 }
 
 detect_jobs() {
@@ -146,7 +227,7 @@ ensure_repo() {
 
     if [[ ! -e "$dir" && ! -L "$dir" ]]; then
         log "首次克隆：$dir"
-        git clone "$url" "$dir"
+        clone_repo "$url" "$dir" || die "克隆失败：$url -> $dir"
         return 0
     fi
 
@@ -180,7 +261,11 @@ ensure_repo() {
 check_env() {
     log "检查运行环境"
 
-    local required=(git make curl sed awk grep find tar)
+    # GO_AMD64_LEVEL 会被直接拼进 sed 表达式，先做白名单校验，避免注入。
+    [[ "$GO_AMD64_LEVEL" =~ ^v[1-4]$ ]] ||
+        die "GO_AMD64_LEVEL 必须是 v1/v2/v3/v4，当前值：${GO_AMD64_LEVEL}"
+
+    local required=(git make curl sed awk grep find tar sha256sum)
     local optional=(gcc g++ cc patch perl python3 unzip xz gzip bzip2 flex bison gawk rsync file)
     local cmd missing=() missing_opt=()
 
@@ -202,8 +287,54 @@ check_env() {
     JOBS="${JOBS:-$(detect_jobs)}"
     [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "无法获取有效的 CPU 并行任务数（JOBS=${JOBS}）"
 
+    # 磁盘空间预检（OpenWrt 全量编译通常需要 10GB 以上）；只警告不阻断，
+    # 因为不同 target / 缓存策略的实际需求差异很大。
+    local avail
+    avail="$(df -Pk "$(dirname "$WORKDIR")" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+    if [[ "$avail" =~ ^[0-9]+$ ]] && (( avail < 10485760 )); then
+        warn "磁盘可用空间不足 10GB（$(dirname "$WORKDIR") 仅剩 ${avail} KiB），完整编译可能失败"
+    fi
+
     export LC_ALL=C LANG=C
     unset -v GREP_OPTIONS || true
+}
+
+# 用 OpenWrt 源码 HEAD 的提交时间作为可复现构建时间戳（OpenWrt buildroot
+# 原生支持 SOURCE_DATE_EPOCH）。调用者可用环境变量显式覆盖。
+set_source_date_epoch() {
+    local epoch
+    if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+        [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] ||
+            die "SOURCE_DATE_EPOCH 必须是整数秒，当前值：${SOURCE_DATE_EPOCH}"
+        log "使用调用方指定的 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
+        return 0
+    fi
+    epoch="$(git log -1 --format=%ct 2>/dev/null || true)"
+    if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+        export SOURCE_DATE_EPOCH="$epoch"
+        log "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}（取自 OpenWrt HEAD 提交时间）"
+    else
+        warn "无法确定 OpenWrt HEAD 提交时间，跳过 SOURCE_DATE_EPOCH 设置"
+    fi
+}
+
+# 避免同一 WORKDIR 上两个 compile.sh 并发写坏源码树。锁目录放在 WORKDIR 内，
+# 记录 PID；进程已退出的锁视为陈旧锁并清理。
+acquire_lock() {
+    LOCK_DIR="${WORKDIR}/.compile.lock"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        printf '%s\n' "$$" > "$LOCK_DIR/pid" || die "写入锁文件失败：$LOCK_DIR"
+        return 0
+    fi
+    local pid=""
+    pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        die "另一个 compile.sh 正在使用 $WORKDIR（PID $pid）"
+    fi
+    warn "清理陈旧构建锁：$LOCK_DIR（PID=${pid:-unknown}）"
+    rm -rf -- "$LOCK_DIR" || die "无法清理陈旧构建锁：$LOCK_DIR"
+    mkdir "$LOCK_DIR" || die "无法创建构建锁：$LOCK_DIR"
+    printf '%s\n' "$$" > "$LOCK_DIR/pid" || die "写入锁文件失败：$LOCK_DIR"
 }
 
 prepare_source() {
@@ -212,7 +343,7 @@ prepare_source() {
     if [[ ! -e "$WORKDIR" && ! -L "$WORKDIR" ]]; then
         mkdir -p -- "$(dirname "$WORKDIR")"
         log "首次运行：克隆 OpenWrt 主仓库 -> $WORKDIR"
-        git clone "$OPENWRT_REPO" "$WORKDIR"
+        clone_repo "$OPENWRT_REPO" "$WORKDIR" || die "克隆 OpenWrt 失败：$OPENWRT_REPO"
     else
         ensure_repo "$OPENWRT_REPO" "$WORKDIR"
     fi
@@ -231,7 +362,8 @@ configure_feeds() {
 
     [[ -f "$FEEDS_CONF" ]] || die "找不到 ${FEEDS_CONF}（当前目录：$(pwd)）"
 
-    sed_inplace 's;git\.openwrt\.org/(feed|project);github.com/openwrt;' "$FEEDS_CONF" || true
+    sed_inplace 's;git\.openwrt\.org/(feed|project);github.com/openwrt;' "$FEEDS_CONF" ||
+        die "改写官方 feeds 源失败：$FEEDS_CONF（已回滚）"
 
     local item name
     for item in "${FEEDS[@]}"; do
@@ -239,34 +371,35 @@ configure_feeds() {
         sed_inplace "/^[[:space:]]*src-git[[:space:]]+${name}[[:space:]]/d" "$FEEDS_CONF"
     done
 
-    local trimmed="${TMP_WORK}/feeds.conf.trimmed"
-    awk '{ a[NR] = $0 }
-         END {
-             n = NR
-             while (n > 0 && a[n] ~ /^[[:space:]]*$/) n--
-             for (i = 1; i <= n; i++) print a[i]
-         }' "$FEEDS_CONF" > "$trimmed"
-    cat -- "$trimmed" > "$FEEDS_CONF"
-
+    # 一次性原子写入（trim + 追加），避免 `>` 截断 / `>>` 半写入损坏 feeds.conf
+    local new_conf="${TMP_WORK}/feeds.conf.new"
     {
+        awk '{ a[NR] = $0 }
+             END {
+                 n = NR
+                 while (n > 0 && a[n] ~ /^[[:space:]]*$/) n--
+                 for (i = 1; i <= n; i++) print a[i]
+             }' "$FEEDS_CONF"
         printf '\n'
         for item in "${FEEDS[@]}"; do
             name="${item%%|*}"
             printf 'src-git %s %s\n' "$name" "${item#*|}"
         done
-    } >> "$FEEDS_CONF"
+    } > "$new_conf"
+    atomic_replace "$new_conf" "$FEEDS_CONF" ||
+        die "写入 ${FEEDS_CONF} 失败（已回滚）"
 
     log "第三方 feeds 配置完成：$FEEDS_CONF"
 }
 
 update_feeds() {
     log "更新所有 feeds"
-    ./scripts/feeds update -a
+    retry_cmd 3 5 ./scripts/feeds update -a || die "./scripts/feeds update -a 失败（已重试 3 次）"
 
     remove_official_v2ray_geodata
 
     log "安装所有 feeds 软件包"
-    ./scripts/feeds install -a
+    retry_cmd 3 5 ./scripts/feeds install -a || die "./scripts/feeds install -a 失败（已重试 3 次）"
 
     install_airplay2_feed_pkgs
 }
@@ -388,19 +521,22 @@ remove_official_v2ray_geodata() {
         log "已删除官方 v2ray-geodata 源"
     fi
 
-    local link
+    local link links="${TMP_WORK}/v2ray-geodata-links.$$"
+    find package/feeds -maxdepth 2 -name 'v2ray-geodata' -type l -print 2>/dev/null > "$links" || true
     while IFS= read -r link; do
         [[ -n "$link" ]] || continue
         rm -f -- "$link"
         log "已删除失效符号链接：$link"
-    done < <(find package/feeds -maxdepth 2 -name 'v2ray-geodata' -type l -print 2>/dev/null || true)
+    done < "$links"
+    rm -f -- "$links"
 }
 
 replace_v2ray_geodata() {
     log "替换 v2ray-geodata"
 
     rm -rf -- "$V2RAY_GEODATA_DIR"
-    git clone "$V2RAY_GEODATA_REPO" "$V2RAY_GEODATA_DIR"
+    clone_repo "$V2RAY_GEODATA_REPO" "$V2RAY_GEODATA_DIR" ||
+        die "克隆 v2ray-geodata 失败：$V2RAY_GEODATA_REPO"
 
     [[ -f "$V2RAY_GEODATA_DIR/Makefile" ]] || die "第三方 v2ray-geodata 缺少 Makefile"
 
@@ -421,27 +557,41 @@ install_extra_repos() {
 prepare_config() {
     log "检查固件配置文件 .config"
 
+    # 只接受 https 源或本地文件，禁止 http/ftp/file:// 等（阻止明文下载与
+    # curl 参数注入）。CONFIG_URL 以 '-' 开头且不是本地文件时会在这里被拒。
+    if [[ "$CONFIG_URL" != https://* && ! -f "$CONFIG_URL" ]]; then
+        die "CONFIG_URL 必须是 https:// URL 或存在的本地文件：$CONFIG_URL"
+    fi
+
+    if [[ -L .config ]]; then
+        die "拒绝通过符号链接写入 .config：$(readlink .config || true)"
+    fi
+
     if [[ -f .config && "$REFRESH_CONFIG" != "1" ]]; then
         log "检测到已有 .config，保留现有配置"
     else
         if [[ -f .config && "$REFRESH_CONFIG" == "1" ]]; then
             local backup=".config.bak.$(date '+%Y%m%d-%H%M%S')"
-            cp -f -- .config "$backup"
+            cp -p -- .config "$backup" || die "备份旧 .config 失败"
             warn "旧配置已备份为 $backup"
         fi
 
         local tmp="${TMP_WORK}/config.download"
         if [[ -f "$CONFIG_URL" ]]; then
-            cp -f -- "$CONFIG_URL" "$tmp"
+            cp -f -- "$CONFIG_URL" "$tmp" || die "读取本地配置失败：$CONFIG_URL"
         else
-            curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
-                "$CONFIG_URL" -o "$tmp" || die "下载 .config 失败：$CONFIG_URL"
+            curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-delay 2 \
+                --connect-timeout 15 --max-time 300 -o "$tmp" -- "$CONFIG_URL" ||
+                die "下载 .config 失败：$CONFIG_URL"
         fi
 
         [[ -s "$tmp" ]] || die "下载的 .config 为空"
         grep -qE '^(CONFIG_|# CONFIG_)' "$tmp" || die "下载的 .config 无效：$CONFIG_URL"
 
-        cat -- "$tmp" > .config
+        atomic_replace "$tmp" .config || {
+            rollback_file .config || true
+            die "写入 .config 失败（已尝试回滚）"
+        }
         log "配置文件就位（$(wc -l < .config | tr -d ' ') 行）"
     fi
 
@@ -490,7 +640,11 @@ set_kernel_config() {
     ' "$file" > "$tmp"
 
     printf '%s\n' "$value" >> "$tmp"
-    cat -- "$tmp" > "$file"
+    atomic_replace "$tmp" "$file" || {
+        rm -f -- "$tmp"
+        rollback_file "$file" || true
+        die "写入内核配置失败（已尝试回滚）：$file"
+    }
     rm -f -- "$tmp"
 
     log "已写入：${value}"
@@ -568,8 +722,11 @@ install_honk_toolchain() {
     fi
 
     if ! command -v rustup >/dev/null 2>&1; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --profile minimal
+        # 先下载到本地再执行：避免管道吞掉 curl 失败，也便于超时/重试。
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
+            --connect-timeout 15 --max-time 120 -o "${TMP_WORK}/rustup-init.sh" \
+            https://sh.rustup.rs || die "下载 rustup 安装脚本失败"
+        sh "${TMP_WORK}/rustup-init.sh" -y --profile minimal || die "安装 rustup 失败"
     fi
 
     if [[ -f "$HOME/.cargo/env" ]]; then
@@ -583,15 +740,23 @@ install_honk_toolchain() {
     # zig / bpf-linker 的资产名和 sha256 都随「宿主机」架构变（不是目标架构）。
     # 之前这里硬编码 x86_64，在 aarch64 机器上会装进 x86_64 的二进制 —— 表现为
     # "zig 版本不符：" 或直接 "cannot execute binary file"。按 uname -m 选择。
-    local host_arch host_bpf_sha
+    # 若升级 zig 版本但未同步提供新 checksum，明确失败而不是拿着旧 checksum
+    # 去校验新资产（那也会失败，但错误信息很难定位）。
+    if [[ "$HONK_ZIG_VERSION" != "0.14.1" && "$HONK_ZIG_SHA256_EXPLICIT" != "1" ]]; then
+        die "升级了 HONK_ZIG_VERSION=${HONK_ZIG_VERSION}，请同时设置 HONK_ZIG_SHA256_X86_64 / HONK_ZIG_SHA256_AARCH64"
+    fi
+
+    local host_arch host_bpf_sha host_zig_sha
     case "$(uname -m)" in
         x86_64|amd64)
             host_arch=x86_64
             host_bpf_sha="$HONK_BPF_LINKER_SHA256_X86_64"
+            host_zig_sha="$HONK_ZIG_SHA256_X86_64"
             ;;
         aarch64|arm64)
             host_arch=aarch64
             host_bpf_sha="$HONK_BPF_LINKER_SHA256_AARCH64"
+            host_zig_sha="$HONK_ZIG_SHA256_AARCH64"
             ;;
         *)
             die "honk 工具链：暂不支持宿主机架构 $(uname -m)（只适配 x86_64 / aarch64；可手动装好 zig + bpf-linker 后设 HONK_TOOLCHAIN_AUTO=0）"
@@ -602,7 +767,8 @@ install_honk_toolchain() {
     # bpf-linker：已装且「能跑」才跳过 —— 只看 command -v 会漏掉架构装错的情况
     if ! command -v bpf-linker >/dev/null 2>&1 ||
         ! bpf-linker --version >/dev/null 2>&1; then
-        curl -fsSL --retry 3 -o "$tmp/bpf-linker.tar.zst" \
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
+            --connect-timeout 15 --max-time 600 -o "$tmp/bpf-linker.tar.zst" \
             "https://github.com/aya-rs/bpf-linker/releases/download/v${HONK_BPF_LINKER_VERSION}/bpf-linker-${host_arch}-unknown-linux-musl.tar.zst" ||
             die "下载 bpf-linker 失败（宿主机 ${host_arch}）"
         printf '%s  %s\n' "$host_bpf_sha" "$tmp/bpf-linker.tar.zst" | sha256sum -c - ||
@@ -613,9 +779,12 @@ install_honk_toolchain() {
 
     if ! command -v zig >/dev/null 2>&1 ||
         [[ "$(zig version 2>/dev/null)" != "$HONK_ZIG_VERSION" ]]; then
-        curl -fsSL --retry 3 -o "$tmp/zig.tar.xz" \
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
+            --connect-timeout 15 --max-time 900 -o "$tmp/zig.tar.xz" \
             "https://ziglang.org/download/${HONK_ZIG_VERSION}/zig-${host_arch}-linux-${HONK_ZIG_VERSION}.tar.xz" ||
             die "下载 zig 失败（宿主机 ${host_arch}）"
+        printf '%s  %s\n' "$host_zig_sha" "$tmp/zig.tar.xz" | sha256sum -c - ||
+            die "zig sha256 校验失败（宿主机 ${host_arch}）"
         sudo tar -xJf "$tmp/zig.tar.xz" -C /usr/local || die "解压 zig 失败"
         sudo ln -sf "/usr/local/zig-${host_arch}-linux-${HONK_ZIG_VERSION}/zig" /usr/local/bin/zig
     fi
@@ -707,15 +876,18 @@ ensure_honk_toolchain() {
 请手动安装（详见 openwrt-suite README「宿主机依赖（honk 核心专用）」）：
   # 按宿主机架构选资产（x86_64 / aarch64 都支持）
   ARCH=$(uname -m); case "$ARCH" in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
-  case "$ARCH" in x86_64) SHA=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450 ;;
-                  aarch64) SHA=d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9 ;;
+  case "$ARCH" in x86_64) BPF_SHA=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
+                          ZIG_SHA=24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c ;;
+                  aarch64) BPF_SHA=d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9
+                           ZIG_SHA=f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b ;;
                   *) echo "unsupported arch: $ARCH"; return 1 ;; esac
   sudo apt-get install -y libbpf-dev cmake libclang-dev zstd xz-utils pkg-config
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-  curl -fsSL -o /tmp/bpf-linker.tar.zst "https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-${ARCH}-unknown-linux-musl.tar.zst"
-  echo "$SHA  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh && sh /tmp/rustup-init.sh -y --profile minimal
+  curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/bpf-linker.tar.zst "https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-${ARCH}-unknown-linux-musl.tar.zst"
+  echo "$BPF_SHA  /tmp/bpf-linker.tar.zst" | sha256sum -c -
   sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
-  curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.14.1/zig-${ARCH}-linux-0.14.1.tar.xz"
+  curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/0.14.1/zig-${ARCH}-linux-0.14.1.tar.xz"
+  echo "$ZIG_SHA  /tmp/zig.tar.xz" | sha256sum -c -
   sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
   sudo ln -sf "/usr/local/zig-${ARCH}-linux-0.14.1/zig" /usr/local/bin/zig
 或设 HONK_TOOLCHAIN_AUTO=1 让本脚本自动安装（需要 sudo）。
@@ -773,7 +945,10 @@ build() {
         [[ -n "${failed// /}" ]] || die "并行编译失败，未能从日志中识别出失败包"
         log "失败包：${failed}"
 
-        for pkg in $failed; do
+        # 用数组遍历，避免裸 $failed 的 glob 展开 / 额外分词
+        local -a failed_pkgs=()
+        IFS=' ' read -r -a failed_pkgs <<< "$failed"
+        for pkg in "${failed_pkgs[@]}"; do
             log_file="retry-$(printf '%s' "$pkg" | tr '/' '_').log"
             log "单包重建：$pkg"
             make "${pkg}/clean" || true
@@ -796,11 +971,14 @@ collect_assets() {
         \( -name '*.img.gz' -o -name '*.img' -o -name '*.bin' \) -size +5M -print -quit)" ]] ||
         die "未生成有效的固件文件"
 
+    local notes="${TMP_WORK}/release-notes.txt"
     {
         echo "Build Time: $(TZ=Asia/Shanghai date)"
         echo "OpenWrt Commit: $(git rev-parse HEAD)"
         echo "Toolchain Key: ${TOOLCHAIN_KEY:-unknown}"
-    } > "$dir/release-notes.txt"
+        echo "Source Date Epoch: ${SOURCE_DATE_EPOCH:-unset}"
+    } > "$notes"
+    mv -f -- "$notes" "$dir/release-notes.txt" || die "写入 release-notes.txt 失败"
 
     log "发布资产已收集到：$dir"
 }
@@ -811,7 +989,10 @@ usage() {
 环境变量: WORKDIR OPENWRT_REPO CONFIG_URL RELEASE_DIR JOBS REFRESH_CONFIG
           SKIP_UPDATE SKIP_DOWNLOAD SKIP_BUILD GO_AMD64_LEVEL TARGET_SUBDIR
           KERNEL_CONFIG CLEAN_KERNEL CLEAN_GOLANG SINGLE_JOB_RETRY TOOLCHAIN_KEY
-          HONK_TOOLCHAIN_AUTO HONK_ZIG_VERSION HONK_BPF_LINKER_VERSION
+          SOURCE_DATE_EPOCH HONK_TOOLCHAIN_AUTO HONK_ZIG_VERSION
+          HONK_ZIG_SHA256_X86_64 HONK_ZIG_SHA256_AARCH64
+          HONK_BPF_LINKER_VERSION HONK_BPF_LINKER_SHA256_X86_64
+          HONK_BPF_LINKER_SHA256_AARCH64
 EOF
 }
 
@@ -834,6 +1015,8 @@ main() {
 
     check_env
     prepare_source
+    acquire_lock
+    set_source_date_epoch
     configure_feeds
     update_feeds
     stage_photondns_cargo

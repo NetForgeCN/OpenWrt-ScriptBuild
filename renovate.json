@@ -2,5 +2,28 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "enabledManagers": [
+    "github-actions"
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "pinDigests": true,
+      "groupName": "github-actions",
+      "automerge": false,
+      "labels": [
+        "dependencies"
+      ]
+    }
+  ],
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "timezone": "Asia/Shanghai",
+  "schedule": [
+    "after 10pm every weekday",
+    "every weekend"
   ]
 }
