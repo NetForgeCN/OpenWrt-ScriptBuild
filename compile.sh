@@ -133,14 +133,19 @@ trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
 atomic_replace() {
     local src="$1" dest="$2" bak tmp
     [[ -f "$src" ]] || { warn "atomic_replace: 源文件不存在：$src"; return 1; }
-    [[ -f "$dest" && ! -L "$dest" ]] || { warn "atomic_replace: 目标不是普通文件（或为符号链接）：$dest"; return 1; }
+    # 首次运行时目标可能尚不存在；已存在的目标必须是普通文件而非符号链接。
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        [[ -f "$dest" && ! -L "$dest" ]] || { warn "atomic_replace: 目标不是普通文件（或为符号链接）：$dest"; return 1; }
+    fi
     mkdir -p -- "${TMP_WORK}/backups" || return 1
     bak="${TMP_WORK}/backups/$(printf '%s' "$dest" | tr '/' '_').bak"
-    if [[ ! -e "$bak" ]]; then
+    if [[ -f "$dest" && ! -e "$bak" ]]; then
         cp -p -- "$dest" "$bak" || return 1
     fi
     tmp="$(mktemp "$(dirname "$dest")/.$(basename "$dest").tmp.XXXXXX")" || return 1
-    cp -p -- "$dest" "$tmp" || { rm -f -- "$tmp"; return 1; }
+    if [[ -f "$dest" ]]; then
+        cp -p -- "$dest" "$tmp" || { rm -f -- "$tmp"; return 1; }
+    fi
     cat -- "$src" > "$tmp" || { rm -f -- "$tmp"; return 1; }
     mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
 }
