@@ -217,7 +217,7 @@ jobs:
             --repo "$GH_REPO" \
             --limit 100 \
             --json tagName,createdAt \
-            --jq 'sort_by(.createdAt) | reverse | map(select(startswith("backup-") | not)) | .[].tagName')"
+            --jq 'sort_by(.createdAt) | reverse | map(select(.tagName | startswith("backup-") | not)) | .[].tagName')"
 
           TAGS=()
           while IFS= read -r line; do
