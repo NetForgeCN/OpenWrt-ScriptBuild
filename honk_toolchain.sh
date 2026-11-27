@@ -165,10 +165,17 @@ read_pins() {
       exit
     }
   ' "$release")"
-  valid_version "$v" && valid_sha "$s" && valid_version "$z" || return 1
+  # 上游 honk 自 2026-11 起移除了 release.yml 里的 setup-zig pin
+  # （ZIG_VERSION 改为 latest），因此 zig 版本经常抓不到。bpf-linker 的
+  # pin 仍在 pins.env 里，值得单独采用；zig 版本缺失时留给本地 pin。
+  valid_version "$v" && valid_sha "$s" || return 1
   DYN_BPF_VERSION="$v"
   DYN_BPF_SHA="$s"
-  DYN_ZIG_VERSION="$z"
+  if valid_version "$z"; then
+    DYN_ZIG_VERSION="$z"
+  else
+    log "上游 release.yml 无 setup-zig pin（zig 已改为 latest），zig 版本用本地 pin"
+  fi
 }
 
 if [[ -n "$SRC_DIR" && -f "$SRC_DIR/.github/ci/pins.env" && -f "$SRC_DIR/.github/workflows/release.yml" ]]; then

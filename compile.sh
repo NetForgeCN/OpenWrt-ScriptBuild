@@ -64,10 +64,12 @@ FEEDS=(
     "ddnsgo|https://github.com/sirpdboy/luci-app-ddns-go.git"
     "kixdns|https://github.com/JohnsonRan/luci-app-kixdns.git"
     "diskman|https://github.com/sbwml/luci-app-diskman.git"
-    "dae|https://github.com/QiuSimons/luci-app-dae.git"
     "opennexttrace|https://github.com/haohaoget/luci-app-open_nexttrace.git"
     "airplay2|https://github.com/NetForgeCN/luci-app-airplay2.git;main"
-    "honk|https://github.com/QiuSimons/luci-app-honk.git"
+    # honk feed 已改名为 luci-app-daeuniverse（honk + dae 双核心），feed 短名
+    # 保持 honk，让 HONK_MAKEFILE=feeds/honk/honk/Makefile 继续有效。
+    # 独立的 luci-app-dae (kix) 已归档，其 dae 包与新 feed 同名会撞包，故移除。
+    "honk|https://github.com/QiuSimons/luci-app-daeuniverse.git"
     "photondns|https://github.com/c2h2/luci-app-photondns.git"
     "nikki|https://github.com/nikkinikki-org/OpenWrt-nikki.git"
     # mosdns 的默认分支是 v5（不是 main/master），这里显式钉住
